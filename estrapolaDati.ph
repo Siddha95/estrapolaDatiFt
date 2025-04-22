@@ -1,119 +1,128 @@
-import pdfplumber
 import tkinter as tk
-from tkinter import filedialog, messagebox
-from ttkthemes import ThemedTk
+from tkinter import filedialog
 from tkinter import ttk
+from ttkthemes import ThemedTk
+import pdfplumber
 import re
-from datetime import datetime
+import datetime
+import pyperclip
 
-# --- Estrazione dati da PDF ---
-def estrai_dati_da_pdf(percorso_pdf):
-    with pdfplumber.open(percorso_pdf) as pdf:
-        testo = "\n".join(page.extract_text() for page in pdf.pages if page.extract_text())
 
+def estrai_dati(pdf_text):
     dati = {
-        "Data Emissione": cerca_data(testo, r"Data.?Emissione.*?(\d{2}/\d{2}/\d{4})"),
-        "Data Scadenza": cerca_data(testo, r"Data.?Scadenza.*?(\d{2}/\d{2}/\d{4})"),
-        "Numero Documento": cerca_valore(testo, r"N[.o]? Documento\s*[:\-]?\s*(\S+)", default="Non trovato"),
-        "Fornitore": cerca_valore(testo, r"Fornitore[:\-]?\s*(.+?)\n", default="Non trovato"),
-        "Importo Imponibile": cerca_valore(testo, r"Imponibile[:\-]?\s*([0-9.,]+)", default="0"),
-        "IVA": cerca_valore(testo, r"IVA[:\-]?\s*([0-9.,]+)%?", default="0"),
-        "Modalità di Pagamento": cerca_valore(testo, r"Pagamento[:\-]?\s*(.+?)\n", default="Non trovato"),
-        "Coordinate Bancarie": cerca_valore(testo, r"(IBAN\s*[:\-]?[A-Z0-9 ]{10,})", default="Non trovato"),
+        "Data Emissione": "",
+        "Data Scadenza": "",
+        "Numero Documento": "",
+        "Fornitore": "",
+        "Importo Imponibile": "",
+        "IVA": "",
+        "Descrizione": "",
+        "Modalità di Pagamento": "",
+        "Coordinate Bancarie": "",
+        "Note": ""
     }
 
-    tipo = "utenza" if re.search(r"(POD|PDR|utenza|energia|acqua|gas)", testo, re.I) else "ordine"
+    lines = pdf_text.splitlines()
+    full_text = pdf_text.lower()
 
-    if tipo == "utenza":
-        dati["Descrizione"] = descrizione_utenza(testo)
-        dati["Note"] = periodo_riferimento(testo)
+    for line in lines:
+        if "data emissione" in line.lower():
+            dati["Data Emissione"] = line.split(":")[-1].strip()
+        if "data scadenza" in line.lower():
+            dati["Data Scadenza"] = line.split(":")[-1].strip()
+        if "numero" in line.lower() and "documento" in line.lower():
+            dati["Numero Documento"] = line.split(":")[-1].strip()
+        if "fornitore" in line.lower():
+            dati["Fornitore"] = line.split(":")[-1].strip()
+        if "imponibile" in line.lower():
+            dati["Importo Imponibile"] = re.findall(r"\d+[.,]\d+", line)[-1] if re.findall(r"\d+[.,]\d+", line) else ""
+        if "iva" in line.lower():
+            dati["IVA"] = re.findall(r"\d+[.,]\d+", line)[-1] if re.findall(r"\d+[.,]\d+", line) else ""
+        if "modalità di pagamento" in line.lower():
+            dati["Modalità di Pagamento"] = line.split(":")[-1].strip()
+        if "coordinate bancarie" in line.lower():
+            dati["Coordinate Bancarie"] = line.split(":")[-1].strip()
+
+    if "utenza" in full_text:
+        tipo = "utenza"
+        desc_match = re.search(r"utenza.*?(energia|gas|acqua).*?(pod|pdr|codice utenza)[^\n]*", full_text)
+        via_match = re.search(r"via [^\n,]+", full_text)
+        descrizione = "Utenza " + (desc_match.group(0).strip() if desc_match else "")
+        descrizione += " - " + (via_match.group(0).strip() if via_match else "")
+        date_matches = re.findall(r"\d{2}/\d{2}/\d{4}", full_text)
+        if date_matches:
+            try:
+                date_objs = [datetime.datetime.strptime(d, "%d/%m/%Y") for d in date_matches]
+                dati["Note"] = f"Periodo: {min(date_objs).strftime('%d/%m/%Y')} - {max(date_objs).strftime('%d/%m/%Y')}"
+            except:
+                dati["Note"] = ""
+        dati["Descrizione"] = descrizione
     else:
-        dati["Descrizione"] = descrizione_ordine(testo)
-        dati["Note"] = nota_ordine(testo)
+        tipo = "ordine"
+        via_match = re.search(r"via [^\n,]+", full_text)
+        dati["Descrizione"] = f"Riassunto fattura - {via_match.group(0).strip() if via_match else ''}"
+        if "manutenzione straordinaria" in full_text:
+            oda_match = re.search(r"oda[^\n]*", full_text)
+            dati["Note"] = oda_match.group(0).strip() if oda_match else "ODA non trovata"
+        else:
+            date_matches = re.findall(r"\d{2}/\d{2}/\d{4}", full_text)
+            if date_matches:
+                try:
+                    date_objs = [datetime.datetime.strptime(d, "%d/%m/%Y") for d in date_matches]
+                    dati["Note"] = f"Periodo: {min(date_objs).strftime('%d/%m/%Y')} - {max(date_objs).strftime('%d/%m/%Y')}"
+                except:
+                    dati["Note"] = ""
 
     return dati
 
-# --- Funzioni di supporto ---
-def cerca_valore(testo, pattern, default=""):
-    match = re.search(pattern, testo, re.IGNORECASE)
-    return match.group(1).strip() if match else default
 
-def cerca_data(testo, pattern):
-    val = cerca_valore(testo, pattern)
-    try:
-        return datetime.strptime(val, "%d/%m/%Y").strftime("%Y-%m-%d")
-    except:
-        return val
-
-def descrizione_utenza(testo):
-    tipo = re.search(r"(acqua|gas|energia)", testo, re.I)
-    codice = re.search(r"(POD|PDR|Codice Utenza)[:\s]*([A-Z0-9]+)", testo, re.I)
-    via = re.search(r"via\s+[\w\s,.]+", testo, re.I)
-    return f"Utenza {tipo.group(1).capitalize()} - {codice.group(1)}: {codice.group(2)} - {via.group(0).strip()}" if tipo and codice and via else "Descrizione utenza non trovata"
-
-def descrizione_ordine(testo):
-    via = re.search(r"via\s+[\w\s,.]+", testo, re.I)
-    return f"Manutenzione - {via.group(0).strip()}" if via else "Descrizione ordine non trovata"
-
-def nota_ordine(testo):
-    if "manutenzione straordinaria" in testo.lower():
-        oda = re.search(r"ODA\s*\d+", testo, re.I)
-        return oda.group(0) if oda else "ODA non trovata"
-    else:
-        return periodo_riferimento(testo)
-
-def periodo_riferimento(testo):
-    date_matches = re.findall(r"\d{2}/\d{2}/\d{4}", testo)
-    date_objs = [datetime.strptime(d, "%d/%m/%Y") for d in date_matches]
-    if date_objs:
-        return f"Periodo: {min(date_objs).strftime('%d/%m/%Y')} - {max(date_objs).strftime('%d/%m/%Y')}"
-    return "Periodo non trovato"
-
-# --- GUI ---
-def apri_file():
+def carica_pdf():
     file_path = filedialog.askopenfilename(filetypes=[("PDF files", "*.pdf")])
     if not file_path:
         return
-    try:
-        dati = estrai_dati_da_pdf(file_path)
-        for chiave in campi:
-            campi[chiave].delete(0, tk.END)
-            campi[chiave].insert(0, dati.get(chiave, ""))
-        descrizione_text.delete("1.0", tk.END)
-        descrizione_text.insert("1.0", dati.get("Descrizione", ""))
-        note_text.delete("1.0", tk.END)
-        note_text.insert("1.0", dati.get("Note", ""))
-    except Exception as e:
-        messagebox.showerror("Errore", str(e))
 
-# --- Setup interfaccia dark ---
-root = ThemedTk(theme="equilux")
-root.title("Fattura Extractor")
-root.geometry("700x600")
+    with pdfplumber.open(file_path) as pdf:
+        testo = "\n".join(page.extract_text() for page in pdf.pages if page.extract_text())
 
-frame = ttk.Frame(root, padding=10)
-frame.pack(fill="both", expand=True)
+    dati = estrai_dati(testo)
+    for campo, valore in dati.items():
+        v = entries[campo]
+        v["var"].set(valore)
 
-tt_btn = ttk.Button(frame, text="Seleziona PDF", command=apri_file)
-tt_btn.pack(pady=10)
 
-campi = {}
-for nome in ["Data Emissione", "Data Scadenza", "Numero Documento", "Fornitore",
-             "Importo Imponibile", "IVA", "Modalità di Pagamento", "Coordinate Bancarie"]:
-    lbl = ttk.Label(frame, text=nome)
-    lbl.pack(anchor="w")
-    entry = ttk.Entry(frame, width=80)
-    entry.pack(fill="x", pady=2)
-    campi[nome] = entry
+def crea_interfaccia():
+    root = ThemedTk(theme="black")
+    root.title("Estrazione Fattura PDF")
+    root.geometry("700x600")
 
-# Descrizione
-ttk.Label(frame, text="Descrizione").pack(anchor="w")
-descrizione_text = tk.Text(frame, height=3, bg="#2e2e2e", fg="white")
-descrizione_text.pack(fill="x", pady=5)
+    frame = ttk.Frame(root, padding=10)
+    frame.pack(fill=tk.BOTH, expand=True)
 
-# Note
-ttk.Label(frame, text="Note").pack(anchor="w")
-note_text = tk.Text(frame, height=3, bg="#2e2e2e", fg="white")
-note_text.pack(fill="x", pady=5)
+    global entries
+    entries = {}
 
-root.mainloop()
+    for i, campo in enumerate([
+        "Data Emissione", "Data Scadenza", "Numero Documento", "Fornitore",
+        "Importo Imponibile", "IVA", "Descrizione", "Modalità di Pagamento",
+        "Coordinate Bancarie", "Note"]):
+
+        label = ttk.Label(frame, text=campo + ":", anchor="w")
+        label.grid(row=i, column=0, sticky="w")
+
+        var = tk.StringVar()
+        entry = ttk.Entry(frame, textvariable=var, width=80)
+        entry.grid(row=i, column=1, padx=5, pady=5, sticky="w")
+
+        copy_btn = ttk.Button(frame, text="📋", width=3, command=lambda v=var: pyperclip.copy(v.get()))
+        copy_btn.grid(row=i, column=2, padx=2, pady=5)
+
+        entries[campo] = {"entry": entry, "var": var}
+
+    carica_btn = ttk.Button(frame, text="Seleziona PDF", command=carica_pdf)
+    carica_btn.grid(row=len(entries), column=1, pady=20)
+
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    crea_interfaccia()
